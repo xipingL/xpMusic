@@ -7,6 +7,9 @@ Rectangle {
     width: 240
     height: 240
 
+    // Internal state for lyrics management
+    property var currentTrackInfo: ({})
+
     Column {
         anchors.fill: parent
         anchors.topMargin: 10
@@ -74,7 +77,15 @@ Rectangle {
         function onCurrentTrackChanged() {
             let track = bluetoothManager.currentTrack
             if (track.songName) {
-                lyricsFetcher.fetchLyrics(track.artist || "", track.songName)
+                currentTrackInfo = { artist: track.artist || "", title: track.songName }
+                // Try to get from cache first (synchronously if available)
+                let cached = lyricsCache.getLyrics(currentTrackInfo.artist, currentTrackInfo.title)
+                if (cached.lines && cached.lines.length > 0) {
+                    lyricsDisplay.lyrics = cached.lines
+                } else {
+                    // Fetch from network
+                    lyricsFetcher.fetchLyrics(currentTrackInfo.artist, currentTrackInfo.title)
+                }
             }
         }
     }
@@ -82,7 +93,18 @@ Rectangle {
     Connections {
         target: lyricsFetcher
         function onLyricsReady(data) {
-            lyricsDisplay.lyrics = data.lines
+            if (data && data.lines && data.lines.length > 0) {
+                lyricsDisplay.lyrics = data.lines
+                // Save to cache for future
+                lyricsCache.saveLyrics(data)
+            }
+        }
+    }
+
+    Connections {
+        target: lyricsFetcher
+        function onLyricsError(error) {
+            console.log("Lyrics fetch error:", error)
         }
     }
 }
