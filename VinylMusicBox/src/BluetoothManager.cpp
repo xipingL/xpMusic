@@ -95,6 +95,10 @@ void BluetoothManager::registerA2dpProfile() {
     call << QVariant::fromValue(options);
 
     QDBusPendingCall pendingCall = systemBus.asyncCall(call);
+    if (!pendingCall.isValid()) {
+        qWarning() << "Failed to send RegisterProfile D-Bus message";
+        return;
+    }
     QDBusPendingCallWatcher *watcher = new QDBusPendingCallWatcher(pendingCall, this);
     connect(watcher, &QDBusPendingCallWatcher::finished, this,
             [](QDBusPendingCallWatcher *watcher) {
@@ -113,25 +117,48 @@ void BluetoothManager::startPairing() {
     m_connectionState = QStringLiteral("Scanning");
     emit connectionStateChanged();
 
-    // BlueZ Agent Manager API - request pairing
+    QDBusConnection systemBus = QDBusConnection::systemBus();
+    if (!systemBus.isConnected()) {
+        qWarning() << "Cannot start pairing: not connected to system D-Bus";
+        return;
+    }
+
+    // BlueZ Agent Manager API - register and activate agent
     QDBusMessage call = QDBusMessage::createMethodCall(
         BLUEZ_SERVICE,
         QStringLiteral("/org/bluez"),
         QStringLiteral("org.bluez.AgentManager1"),
         QStringLiteral("RegisterAgent")
     );
-    // Default capability allows pairing without confirmation for trusted devices
     call << QVariant::fromValue(QStringLiteral("/org/bluez/agent"));
     call << QVariant::fromValue(QStringLiteral("NoInputNoOutput"));
-
-    QDBusConnection systemBus = QDBusConnection::systemBus();
     systemBus.asyncCall(call);
+
+    // Make this the default agent
+    QDBusMessage defaultCall = QDBusMessage::createMethodCall(
+        BLUEZ_SERVICE,
+        QStringLiteral("/org/bluez"),
+        QStringLiteral("org.bluez.AgentManager1"),
+        QStringLiteral("RequestDefaultAgent")
+    );
+    defaultCall << QVariant::fromValue(QStringLiteral("/org/bluez/agent"));
+    systemBus.asyncCall(defaultCall);
+
+    // Start discovery on default adapter
+    QDBusMessage discoveryCall = QDBusMessage::createMethodCall(
+        BLUEZ_SERVICE,
+        QStringLiteral("/org/bluez"),
+        QStringLiteral("org.bluez.Adapter1"),
+        QStringLiteral("StartDiscovery")
+    );
+    systemBus.asyncCall(discoveryCall);
 }
 
 void BluetoothManager::disconnect() {
     qDebug() << "Disconnecting Bluetooth device";
     m_connectionState = QStringLiteral("Disconnected");
     m_deviceName.clear();
+    m_devicePath.clear();
     emit connectionStateChanged();
     emit deviceNameChanged();
 }
@@ -141,23 +168,35 @@ void BluetoothManager::playPause() {
     m_isPlaying = !m_isPlaying;
     emit isPlayingChanged();
 
-    // Send play/pause command to BlueZ MediaControl
-    if (!m_deviceName.isEmpty()) {
-        QDBusMessage call = QDBusMessage::createMethodCall(
-            BLUEZ_SERVICE,
-            QStringLiteral("/org/bluez"),
-            QStringLiteral("org.bluez.MediaControl1"),
-            m_isPlaying ? QStringLiteral("Play") : QStringLiteral("Pause")
-        );
-        QDBusConnection::systemBus().asyncCall(call);
+    // Send play/pause command to BlueZ MediaControl at correct device path
+    if (m_devicePath.isEmpty()) {
+        qWarning() << "No device path set, cannot send MediaControl command";
+        return;
     }
+
+    if (!QDBusConnection::systemBus().isConnected()) {
+        qWarning() << "System D-Bus not connected";
+        return;
+    }
+
+    QDBusMessage call = QDBusMessage::createMethodCall(
+        BLUEZ_SERVICE,
+        m_devicePath,
+        QStringLiteral("org.bluez.MediaControl1"),
+        m_isPlaying ? QStringLiteral("Play") : QStringLiteral("Pause")
+    );
+    QDBusConnection::systemBus().asyncCall(call);
 }
 
 void BluetoothManager::nextTrack() {
     qDebug() << "Next track";
+
+    if (m_devicePath.isEmpty()) return;
+    if (!QDBusConnection::systemBus().isConnected()) return;
+
     QDBusMessage call = QDBusMessage::createMethodCall(
         BLUEZ_SERVICE,
-        QStringLiteral("/org/bluez"),
+        m_devicePath,
         QStringLiteral("org.bluez.MediaControl1"),
         QStringLiteral("Next")
     );
@@ -166,9 +205,13 @@ void BluetoothManager::nextTrack() {
 
 void BluetoothManager::previousTrack() {
     qDebug() << "Previous track";
+
+    if (m_devicePath.isEmpty()) return;
+    if (!QDBusConnection::systemBus().isConnected()) return;
+
     QDBusMessage call = QDBusMessage::createMethodCall(
         BLUEZ_SERVICE,
-        QStringLiteral("/org/bluez"),
+        m_devicePath,
         QStringLiteral("org.bluez.MediaControl1"),
         QStringLiteral("Previous")
     );
@@ -179,33 +222,82 @@ void BluetoothManager::onInterfacesAdded(const QDBusMessage &msg) {
     const QList<QVariant> args = msg.arguments();
     if (args.size() < 2) return;
 
-    // Extract object path and interface list
+    // Extract object path
     QString path = args.at(0).value<QDBusObjectPath>().path();
-    QDBusArgument interfacesArg = args.at(1).asVariant().value<QDBusArgument>();
 
-    QVariantMap interfaces;
-    interfacesArg >> interfaces;
+    // args[1] is a{sv} - map of interface name to array of property dicts
+    // BlueZ ObjectManager.InterfacesAdded: o a{sv}
+    QVariant arg1 = args.at(1);
+    QVariantMap interfacesMap = arg1.value<QVariantMap>();
 
-    // Check for MediaPlayer1 (AVRCP player)
-    if (interfaces.contains(QStringLiteral("org.bluez.MediaPlayer1"))) {
-        QVariantMap playerProps = interfaces.value(QStringLiteral("org.bluez.MediaPlayer1")).value<QDBusArgument>();
-        qDebug() << "MediaPlayer discovered at:" << path;
-        parsePlayerProperties(playerProps);
-    }
+    // Check for Device1 (Bluetooth device) - must handle a{s*} structure
+    if (interfacesMap.contains(QStringLiteral("org.bluez.Device1"))) {
+        QVariant deviceVar = interfacesMap.value(QStringLiteral("org.bluez.Device1"));
+        QVariantMap deviceProps;
 
-    // Check for Device1 (Bluetooth device)
-    if (interfaces.contains(QStringLiteral("org.bluez.Device1"))) {
-        QVariantMap deviceProps = interfaces.value(QStringLiteral("org.bluez.Device1")).value<QDBusArgument>();
-        QString name = deviceProps.value(QStringLiteral("Name")).toString();
+        // Handle both direct QVariantMap and nested QDBusArgument
+        if (deviceVar.canConvert<QDBusArgument>()) {
+            QDBusArgument dbusArg = deviceVar.value<QDBusArgument>();
+            dbusArg.beginArray();
+            while (!dbusArg.atEnd()) {
+                QString key;
+                QVariant value;
+                dbusArg >> key >> value;
+                deviceProps[key] = value;
+            }
+            dbusArg.endArray();
+        } else if (deviceVar.canConvert<QVariantMap>()) {
+            deviceProps = deviceVar.value<QVariantMap>();
+        }
+
         bool connected = deviceProps.value(QStringLiteral("Connected")).toBool();
 
-        if (connected && !name.isEmpty()) {
-            qDebug() << "Device connected:" << name;
-            m_deviceName = name;
-            m_connectionState = QStringLiteral("Connected");
-            emit deviceNameChanged();
-            emit connectionStateChanged();
+        if (connected) {
+            // Use Alias (preferred) or fallback to Name
+            QString name = deviceProps.value(QStringLiteral("Alias")).toString();
+            if (name.isEmpty()) {
+                name = deviceProps.value(QStringLiteral("Name")).toString();
+            }
+
+            if (!name.isEmpty()) {
+                qDebug() << "Device connected:" << name << "at path:" << path;
+                m_deviceName = name;
+                m_devicePath = path;
+                m_connectionState = QStringLiteral("Connected");
+                emit deviceNameChanged();
+                emit connectionStateChanged();
+
+                // Subscribe to PropertiesChanged on this device path for real-time updates
+                QDBusConnection systemBus = QDBusConnection::systemBus();
+                systemBus.connect(BLUEZ_SERVICE, path,
+                                 "org.freedesktop.DBus.Properties",
+                                 "PropertiesChanged",
+                                 this, SLOT(onPropertiesChanged(QDBusMessage)));
+            }
         }
+    }
+
+    // Check for MediaPlayer1 (AVRCP player)
+    if (interfacesMap.contains(QStringLiteral("org.bluez.MediaPlayer1"))) {
+        QVariant playerVar = interfacesMap.value(QStringLiteral("org.bluez.MediaPlayer1"));
+        QVariantMap playerProps;
+
+        if (playerVar.canConvert<QDBusArgument>()) {
+            QDBusArgument dbusArg = playerVar.value<QDBusArgument>();
+            dbusArg.beginArray();
+            while (!dbusArg.atEnd()) {
+                QString key;
+                QVariant value;
+                dbusArg >> key >> value;
+                playerProps[key] = value;
+            }
+            dbusArg.endArray();
+        } else if (playerVar.canConvert<QVariantMap>()) {
+            playerProps = playerVar.value<QVariantMap>();
+        }
+
+        qDebug() << "MediaPlayer discovered at:" << path;
+        parsePlayerProperties(playerProps);
     }
 }
 
@@ -224,12 +316,24 @@ void BluetoothManager::onInterfacesRemoved(const QDBusMessage &msg) {
 
 void BluetoothManager::parsePlayerProperties(const QVariantMap &props) {
     // Parse AVRCP metadata from MediaPlayer1 properties
-    // These contain: Title, Artist, Album, Track
 
     if (props.contains(QStringLiteral("Track"))) {
-        QDBusArgument trackArg = props.value(QStringLiteral("Track")).value<QDBusArgument>();
+        QVariant trackVar = props.value(QStringLiteral("Track"));
         QVariantMap track;
-        trackArg >> track;
+
+        if (trackVar.canConvert<QDBusArgument>()) {
+            QDBusArgument dbusArg = trackVar.value<QDBusArgument>();
+            dbusArg.beginArray();
+            while (!dbusArg.atEnd()) {
+                QString key;
+                QVariant value;
+                dbusArg >> key >> value;
+                track[key] = value;
+            }
+            dbusArg.endArray();
+        } else if (trackVar.canConvert<QVariantMap>()) {
+            track = trackVar.value<QVariantMap>();
+        }
 
         m_currentTrack.clear();
 
@@ -274,10 +378,34 @@ void BluetoothManager::onPropertiesChanged(const QDBusMessage &msg) {
     if (args.size() < 3) return;
 
     QString interface = args.at(0).toString();
-    QVariantMap changedProps = args.at(1).value<QVariantMap>();
+    QVariantMap changedProps;
+
+    QVariant arg1 = args.at(1);
+    if (arg1.canConvert<QDBusArgument>()) {
+        QDBusArgument dbusArg = arg1.value<QDBusArgument>();
+        dbusArg.beginArray();
+        while (!dbusArg.atEnd()) {
+            QString key;
+            QVariant value;
+            dbusArg >> key >> value;
+            changedProps[key] = value;
+        }
+        dbusArg.endArray();
+    } else if (arg1.canConvert<QVariantMap>()) {
+        changedProps = arg1.value<QVariantMap>();
+    }
 
     if (interface == QStringLiteral("org.bluez.MediaPlayer1")) {
         parsePlayerProperties(changedProps);
+    } else if (interface == QStringLiteral("org.bluez.Device1")) {
+        // Handle device properties (e.g., Connected changed to false)
+        if (changedProps.contains(QStringLiteral("Connected"))) {
+            bool connected = changedProps.value(QStringLiteral("Connected")).toBool();
+            if (!connected) {
+                qDebug() << "Device disconnected via PropertiesChanged";
+                disconnect();
+            }
+        }
     } else if (interface == QStringLiteral("org.bluez.MediaTransport1")) {
         // Handle transport properties (codec, volume, etc.)
         if (changedProps.contains(QStringLiteral("Volume"))) {

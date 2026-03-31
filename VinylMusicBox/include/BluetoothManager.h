@@ -34,6 +34,7 @@ signals:
 private:
     QString m_connectionState = "Disconnected";
     QString m_deviceName;
+    QString m_devicePath;
     QVariantMap m_currentTrack;
     bool m_isPlaying = false;
 };
