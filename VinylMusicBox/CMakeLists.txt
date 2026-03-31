@@ -14,7 +14,7 @@ qt_add_resources(vinylmusicbox "qml"
         qml/main.qml
 )
 
-find_package(Qt6 REQUIRED COMPONENTS Core QML Quick Network Multimedia)
+find_package(Qt6 REQUIRED COMPONENTS Core QML Quick Network Multimedia Sql)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(BLUEZ bluez)
 pkg_check_modules(PULSEAUDIO libpulse)
@@ -33,10 +33,11 @@ add_executable(vinylmusicbox
     src/LyricsCache.cpp
     include/BluetoothManager.h
     include/LyricsFetcher.h
+    include/LyricsCache.h
 )
 
 target_link_libraries(vinylmusicbox PRIVATE
-    Qt6::Core Qt6::QML Qt6::Quick Qt6::Network Qt6::Multimedia
+    Qt6::Core Qt6::QML Qt6::Quick Qt6::Network Qt6::Multimedia Qt6::Sql
     ${BLUEZ_LIBRARIES} ${PULSEAUDIO_LIBRARIES}
     curl sqlite3 pthread
 )
