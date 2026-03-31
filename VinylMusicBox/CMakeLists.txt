@@ -13,6 +13,7 @@ qt_add_resources(vinylmusicbox "qml"
     FILES
         qml/main.qml
         qml/VinylPlayer.qml
+        qml/LyricsDisplay.qml
         resources/vinyl_default.png
 )
 
