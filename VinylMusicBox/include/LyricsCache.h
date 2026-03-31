@@ -21,4 +21,5 @@ private:
 
 private:
     QString m_databasePath;
+    QString m_connectionName;
 };

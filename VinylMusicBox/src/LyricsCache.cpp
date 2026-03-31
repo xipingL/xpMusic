@@ -9,24 +9,30 @@
 #include <algorithm>
 
 LyricsCache::LyricsCache(QObject *parent) : QObject(parent) {
+    // Use unique connection name based on this pointer to avoid conflicts
+    m_connectionName = QString("lyrics_cache_%1").arg(reinterpret_cast<quintptr>(this), 16);
     initDatabase();
 }
 
 LyricsCache::~LyricsCache() {
+    // Explicitly close database connection
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName, false);
+    if (db.isOpen()) {
+        db.close();
+    }
+    QSqlDatabase::removeDatabase(m_connectionName);
 }
 
 void LyricsCache::initDatabase() {
-    // Use a unique connection name for this instance
-    QString connectionName = "lyrics_cache_connection";
+    // Remove any existing connection with this name
     {
-        // If a connection with this name already exists, remove it first
-        QSqlDatabase db = QSqlDatabase::database(connectionName, false);
+        QSqlDatabase db = QSqlDatabase::database(m_connectionName, false);
         if (db.isValid()) {
             db.close();
         }
     }
 
-    QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", connectionName);
+    QSqlDatabase db = QSqlDatabase::addDatabase("QSQLITE", m_connectionName);
 
     // Store the database path
     QString cacheDir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
@@ -47,12 +53,8 @@ void LyricsCache::initDatabase() {
                "  plain_lyrics TEXT,"
                "  synced_lyrics TEXT,"
                "  duration REAL,"
-               "  source TEXT,"
                "  cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
                ")");
-
-    // Create index on artist/title for faster lookups
-    query.exec("CREATE INDEX IF NOT EXISTS idx_artist_title ON lyrics(artist, title)");
 }
 
 QString LyricsCache::generateHash(const QString& artist, const QString& title) {
@@ -63,7 +65,7 @@ QString LyricsCache::generateHash(const QString& artist, const QString& title) {
 bool LyricsCache::hasLyrics(const QString& artist, const QString& title) {
     QString hash = generateHash(artist, title);
 
-    QSqlDatabase db = QSqlDatabase::database("lyrics_cache_connection");
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
     QSqlQuery query(db);
     query.prepare("SELECT hash FROM lyrics WHERE hash = :hash");
     query.bindValue(":hash", hash);
@@ -80,9 +82,9 @@ LyricsData LyricsCache::getLyrics(const QString& artist, const QString& title) {
     LyricsData result;
     QString hash = generateHash(artist, title);
 
-    QSqlDatabase db = QSqlDatabase::database("lyrics_cache_connection");
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
     QSqlQuery query(db);
-    query.prepare("SELECT artist, title, plain_lyrics, synced_lyrics, duration, source FROM lyrics WHERE hash = :hash");
+    query.prepare("SELECT artist, title, plain_lyrics, synced_lyrics, duration FROM lyrics WHERE hash = :hash");
     query.bindValue(":hash", hash);
 
     if (!query.exec()) {
@@ -96,7 +98,6 @@ LyricsData LyricsCache::getLyrics(const QString& artist, const QString& title) {
         QString plainLyrics = query.value(2).toString();
         QString syncedLyrics = query.value(3).toString();
         double duration = query.value(4).toDouble();
-        // source is stored but not used in LyricsData currently
 
         result = deserializeSyncedLyrics(syncedLyrics, plainLyrics, duration);
     }
@@ -113,17 +114,16 @@ void LyricsCache::saveLyrics(const LyricsData& lyrics) {
     QString hash = generateHash(lyrics.artistName, lyrics.songName);
     QString syncedText = serializeSyncedLyrics(lyrics);
 
-    QSqlDatabase db = QSqlDatabase::database("lyrics_cache_connection");
+    QSqlDatabase db = QSqlDatabase::database(m_connectionName);
     QSqlQuery query(db);
-    query.prepare("INSERT OR REPLACE INTO lyrics (hash, artist, title, plain_lyrics, synced_lyrics, duration, source) "
-                  "VALUES (:hash, :artist, :title, :plain_lyrics, :synced_lyrics, :duration, :source)");
+    query.prepare("INSERT OR REPLACE INTO lyrics (hash, artist, title, plain_lyrics, synced_lyrics, duration) "
+                  "VALUES (:hash, :artist, :title, :plain_lyrics, :synced_lyrics, :duration)");
     query.bindValue(":hash", hash);
     query.bindValue(":artist", lyrics.artistName);
     query.bindValue(":title", lyrics.songName);
     query.bindValue(":plain_lyrics", lyrics.plainLyrics);
     query.bindValue(":synced_lyrics", syncedText);
     query.bindValue(":duration", lyrics.duration);
-    query.bindValue(":source", ""); // Source not stored in LyricsData
 
     if (!query.exec()) {
         qWarning() << "saveLyrics query failed:" << query.lastError().text();
