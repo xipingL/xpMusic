@@ -12,6 +12,8 @@ qt_add_resources(vinylmusicbox "qml"
     PREFIX "/"
     FILES
         qml/main.qml
+        qml/VinylPlayer.qml
+        resources/vinyl_default.png
 )
 
 find_package(Qt6 REQUIRED COMPONENTS Core QML Quick Network Multimedia Sql)
