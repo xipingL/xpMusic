@@ -2,63 +2,120 @@
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QUrl>
+#include <QUrlQuery>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QDebug>
+#include <QTimer>
 
 LyricsFetcher::LyricsFetcher(QObject* parent)
     : QObject(parent)
     , m_networkManager(new QNetworkAccessManager(this))
+    , m_currentReply(nullptr)
+    , m_timeoutTimer(new QTimer(this))
 {
+    m_timeoutTimer->setSingleShot(true);
+    m_timeoutTimer->setInterval(15000);  // 15 second timeout
+    connect(m_timeoutTimer, &QTimer::timeout, this, &LyricsFetcher::onTimeout);
 }
 
 void LyricsFetcher::fetchLyrics(const QString& artist, const QString& title) {
-    QString url = QString("https://lrclib.net/api/get?artist_name=%1&track_name=%2")
-                      .arg(QUrl::toPercentEncoding(artist))
-                      .arg(QUrl::toPercentEncoding(title));
+    // Cancel any in-flight request
+    if (m_currentReply) {
+        m_currentReply->abort();
+        m_currentReply->deleteLater();
+        m_currentReply = nullptr;
+    }
+    m_timeoutTimer->stop();
 
-    QNetworkRequest req(QUrl(url));
+    // Build URL with proper encoding using QUrlQuery
+    QUrl url(QStringLiteral("https://lrclib.net/api/get"));
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("artist_name"), artist);
+    query.addQueryItem(QStringLiteral("track_name"), title);
+    url.setQuery(query);
+
+    QNetworkRequest req(url);
     req.setHeader(QNetworkRequest::UserAgentHeader, "VinylMusicBox/1.0");
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
 
-    QNetworkReply* reply = m_networkManager->get(req);
-    connect(reply, &QNetworkReply::finished, this, &LyricsFetcher::onNetworkReply);
+    m_currentReply = m_networkManager->get(req);
+    connect(m_currentReply, &QNetworkReply::finished, this, &LyricsFetcher::onNetworkReply);
+    m_timeoutTimer->start();
+}
+
+void LyricsFetcher::onTimeout() {
+    if (m_currentReply) {
+        m_currentReply->abort();
+        m_currentReply->deleteLater();
+        m_currentReply = nullptr;
+    }
+    emit fetchError(QStringLiteral("Request timeout"));
 }
 
 void LyricsFetcher::onNetworkReply() {
+    m_timeoutTimer->stop();
+
     QNetworkReply* reply = qobject_cast<QNetworkReply*>(sender());
     if (!reply) {
-        emit fetchError("Invalid network reply");
+        emit fetchError(QStringLiteral("Invalid network reply"));
+        return;
+    }
+
+    // Check if reply was aborted by timeout
+    if (reply != m_currentReply) {
+        reply->deleteLater();
         return;
     }
 
     if (reply->error() != QNetworkReply::NoError) {
-        QString errorMsg = QString("Network error: %1").arg(reply->errorString());
+        QString errorMsg = QStringLiteral("Network error: %1").arg(reply->errorString());
         emit fetchError(errorMsg);
         reply->deleteLater();
+        m_currentReply = nullptr;
         return;
     }
 
     QByteArray data = reply->readAll();
     reply->deleteLater();
+    m_currentReply = nullptr;
 
     QJsonDocument doc = QJsonDocument::fromJson(data);
     if (doc.isNull() || !doc.isObject()) {
-        emit fetchError("Invalid JSON response");
+        emit fetchError(QStringLiteral("Invalid JSON response"));
         return;
     }
 
     QJsonObject json = doc.object();
 
     LyricsData lyrics;
-    lyrics.songName = json.value("songName").toString();
-    lyrics.artistName = json.value("artistName").toString();
-    lyrics.albumName = json.value("albumName").toString();
-    lyrics.duration = json.value("duration").toDouble();
+
+    // Validate required fields exist
+    if (json.contains(QStringLiteral("songName"))) {
+        lyrics.songName = json.value(QStringLiteral("songName")).toString();
+    }
+    if (json.contains(QStringLiteral("artistName"))) {
+        lyrics.artistName = json.value(QStringLiteral("artistName")).toString();
+    }
+    if (json.contains(QStringLiteral("albumName"))) {
+        lyrics.albumName = json.value(QStringLiteral("albumName")).toString();
+    }
+    if (json.contains(QStringLiteral("duration"))) {
+        lyrics.duration = json.value(QStringLiteral("duration")).toDouble();
+    }
 
     // Check for synced lyrics first, then plain lyrics
-    QString syncedLyrics = json.value("syncedLyrics").toString();
-    QString plainLyrics = json.value("plainLyrics").toString();
+    QString syncedLyrics;
+    QString plainLyrics;
+
+    if (json.contains(QStringLiteral("syncedLyrics"))) {
+        syncedLyrics = json.value(QStringLiteral("syncedLyrics")).toString();
+    }
+    if (json.contains(QStringLiteral("plainLyrics"))) {
+        plainLyrics = json.value(QStringLiteral("plainLyrics")).toString();
+    }
 
     if (!syncedLyrics.isEmpty()) {
         lyrics.hasSyncedLyrics = true;
@@ -68,7 +125,7 @@ void LyricsFetcher::onNetworkReply() {
         lyrics.hasSyncedLyrics = false;
         lyrics.plainLyrics = plainLyrics;
     } else {
-        emit fetchError("No lyrics found");
+        emit fetchError(QStringLiteral("No lyrics found"));
         return;
     }
 
@@ -112,15 +169,4 @@ void LyricsFetcher::parseLRC(const QString& lrcText, LyricsData& out) {
             }
         }
     }
-}
-
-double LyricsFetcher::parseTimestamp(const QString& ts) {
-    // Format: [mm:ss.xx] or [mm:ss]
-    QString t = ts.mid(1, ts.length() - 2);  // Remove brackets
-    QStringList parts = t.split(":");
-    if (parts.size() < 2) return 0.0;
-
-    int minutes = parts[0].toInt();
-    double seconds = parts[1].toDouble();
-    return minutes * 60 + seconds;
 }

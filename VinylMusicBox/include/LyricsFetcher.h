@@ -3,6 +3,7 @@
 #include <QString>
 #include <QList>
 #include <QNetworkAccessManager>
+#include <QTimer>
 
 struct LyricLine {
     double timestamp;  // seconds
@@ -32,10 +33,12 @@ signals:
 
 private slots:
     void onNetworkReply();
+    void onTimeout();
 
 private:
     void parseLRC(const QString& lrcText, LyricsData& out);
-    double parseTimestamp(const QString& ts);
 
     QNetworkAccessManager* m_networkManager = nullptr;
+    QNetworkReply* m_currentReply = nullptr;
+    QTimer* m_timeoutTimer = nullptr;
 };
