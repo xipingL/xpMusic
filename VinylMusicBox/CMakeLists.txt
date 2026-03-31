@@ -7,12 +7,24 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
+# Qt Resources for QML
+qt_add_resources(vinylmusicbox "qml"
+    PREFIX "/"
+    FILES
+        qml/main.qml
+)
+
 find_package(Qt6 REQUIRED COMPONENTS Core QML Quick Network Multimedia)
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(BLUEZ REQUIRED bluez)
-pkg_check_modules(PULSEAUDIO REQUIRED libpulse)
+pkg_check_modules(BLUEZ bluez)
+pkg_check_modules(PULSEAUDIO libpulse)
 
-include_directories(${BLUEZ_INCLUDE_DIRS} ${PULSEAUDIO_INCLUDE_DIRS})
+if(BLUEZ_FOUND)
+    include_directories(${BLUEZ_INCLUDE_DIRS})
+endif()
+if(PULSEAUDIO_FOUND)
+    include_directories(${PULSEAUDIO_INCLUDE_DIRS})
+endif()
 
 add_executable(vinylmusicbox
     src/main.cpp
