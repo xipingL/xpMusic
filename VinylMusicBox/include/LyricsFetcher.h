@@ -2,6 +2,7 @@
 #include <QObject>
 #include <QString>
 #include <QList>
+#include <QNetworkAccessManager>
 
 struct LyricLine {
     double timestamp;  // seconds
