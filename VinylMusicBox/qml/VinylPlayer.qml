@@ -13,6 +13,7 @@ Item {
         width: Math.min(parent.width, parent.height) * 0.9
         height: width
         source: coverImage != "" ? coverImage : "qrc:/resources/vinyl_default.png"
+        rotation: vinylPlayer.rotation
 
         SequentialAnimation on rotation {
             id: spinAnimation
@@ -29,10 +30,11 @@ Item {
 
     Rectangle {
         id: centerLabel
-        anchors.centerIn: parent
-        width: parent.width * 0.2
+        anchors.centerIn: vinylDisc
+        width: vinylDisc.width * 0.2
         height: width
         color: "#1a1a2e"
         radius: width / 2
+        rotation: vinylPlayer.rotation
     }
 }
