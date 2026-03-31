@@ -32,6 +32,7 @@ add_executable(vinylmusicbox
     src/LyricsFetcher.cpp
     src/LyricsCache.cpp
     include/BluetoothManager.h
+    include/LyricsFetcher.h
 )
 
 target_link_libraries(vinylmusicbox PRIVATE
